@@ -1,9 +1,13 @@
-// src/app/(tabs)/index.tsx
+
 import { useState, useEffect, useRef } from "react";
 import {
   mintaIzinLokasi,
   ambilKoordinatSaatIni,
 } from "../../services/locationServices";
+import {
+  simpanCacheCuaca,
+  ambilCacheCuaca,
+} from "../../services/weatherCache";
 
 import {
   View,
@@ -30,9 +34,14 @@ import {
   DataKualitasUdara,
 } from "../../../types/weather";
 import { ambilSemuaFavorit } from "../../services/favoritStorage";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
+import { simpanRiwayat } from "../../services/riwayatstorage";
 
 export default function HalamanUtama() {
+  const { kota: kotaDariRiwayat } = useLocalSearchParams<{
+    kota?: string;
+  }>();
+
   const [teksCari, setTeksCari] = useState("");
   const [hasilPencarian, setHasilPencarian] = useState<HasilGeocoding[]>([]);
   const [kotaTerpilih, setKotaTerpilih] =
@@ -43,15 +52,14 @@ export default function HalamanUtama() {
 
   const [sedangMemuat, setSedangMemuat] = useState(false);
   const [pesanError, setPesanError] = useState<string | null>(null);
-
   const [pesanLokasi, setPesanLokasi] = useState<string | null>(null);
-
-  // Menyimpan status apakah kota sudah menjadi favorit
   const [sudahFavorit, setSudahFavorit] = useState(false);
 
   const teksTertunda = useDebounce(teksCari, 500);
-  const requestIdRef = useRef(0); // pencegah race condition
+  const requestIdRef = useRef(0);
+  const riwayatDiprosesRef = useRef<string | null>(null);
 
+  // Mencari kota berdasarkan teks yang dimasukkan pengguna
   useEffect(() => {
     if (teksTertunda.trim().length === 0) {
       setHasilPencarian([]);
@@ -63,14 +71,67 @@ export default function HalamanUtama() {
       .catch(() => setHasilPencarian([]));
   }, [teksTertunda]);
 
-  async function pilihKota(kota: HasilGeocoding) {
-    setKotaTerpilih(kota);
+  // Memproses kota yang dipilih dari tab Riwayat
+  
+  useEffect(() => {
+    const namaKota = Array.isArray(kotaDariRiwayat)
+      ? kotaDariRiwayat[0]
+      : kotaDariRiwayat;
 
-    // Cek apakah kota sudah ada di daftar favorit
+    if (
+      !namaKota ||
+      riwayatDiprosesRef.current === namaKota
+    ) {
+      return;
+    }
+
+    riwayatDiprosesRef.current = namaKota;
+    setTeksCari(namaKota);
+    setPesanError(null);
+
+    async function cariDariRiwayat() {
+      try {
+        const hasil = await cariKota(namaKota);
+
+        const kota = hasil.find(
+          (item) =>
+            item.name.toLowerCase() ===
+            namaKota.toLowerCase()
+        ) ?? hasil[0];
+
+        if (kota) {
+          await pilihKota(kota);
+        } else {
+          setPesanError("Kota tidak ditemukan.");
+        }
+      } catch {
+        setPesanError(
+          "Gagal mencari kota. Periksa koneksi internet Anda."
+        );
+      }
+    }
+
+    cariDariRiwayat();
+  }, [kotaDariRiwayat]);
+
+  async function pilihKota(kota: HasilGeocoding) {
+    // Simpan kota ke riwayat, kecuali lokasi GPS saat ini
+    if (kota.id !== -1) {
+      try {
+        await simpanRiwayat(kota.name);
+      } catch (error) {
+        console.error("Gagal menyimpan riwayat:", error);
+      }
+    }
+
+    setKotaTerpilih(kota);
+    setPesanError(null);
+
+    // Periksa apakah kota sudah menjadi favorit
     const daftarFavorit = await ambilSemuaFavorit();
 
     const sudahAda = daftarFavorit.some(
-      (item) => item.id === kota.id,
+      (item) => item.id === kota.id
     );
 
     setSudahFavorit(sudahAda);
@@ -78,7 +139,6 @@ export default function HalamanUtama() {
     const idSaatIni = ++requestIdRef.current;
 
     setSedangMemuat(true);
-    setPesanError(null);
 
     try {
       const [dataCuaca, dataAQI] = await Promise.all([
@@ -94,7 +154,7 @@ export default function HalamanUtama() {
       if (idSaatIni !== requestIdRef.current) return;
 
       setPesanError(
-        "Gagal memuat data cuaca. Periksa koneksi internet Anda.",
+        "Gagal memuat data cuaca. Periksa koneksi internet Anda."
       );
     } finally {
       if (idSaatIni === requestIdRef.current) {
@@ -108,29 +168,33 @@ export default function HalamanUtama() {
 
     if (status === "denied") {
       setPesanLokasi(
-        "Izin lokasi ditolak. Silakan cari kota secara manual di atas.",
+        "Izin lokasi ditolak. Silakan cari kota secara manual di atas."
       );
       return;
     }
 
     if (status === "unavailable") {
       setPesanLokasi(
-        "Layanan lokasi tidak aktif di perangkat ini. Silakan cari kota secara manual.",
+        "Layanan lokasi tidak aktif di perangkat ini. Silakan cari kota secara manual."
       );
       return;
     }
 
     setPesanLokasi(null);
 
-    const koordinat = await ambilKoordinatSaatIni();
+    try {
+      const koordinat = await ambilKoordinatSaatIni();
 
-    pilihKota({
-      id: -1,
-      name: "Lokasi Saat Ini",
-      latitude: koordinat.latitude,
-      longitude: koordinat.longitude,
-      country: "",
-    });
+      await pilihKota({
+        id: -1,
+        name: "Lokasi Saat Ini",
+        latitude: koordinat.latitude,
+        longitude: koordinat.longitude,
+        country: "",
+      });
+    } catch {
+      setPesanLokasi("Gagal mendapatkan lokasi perangkat.");
+    }
   }
 
   return (
@@ -161,9 +225,24 @@ export default function HalamanUtama() {
 
           <Button
             title="Coba Lagi"
-            onPress={() =>
-              kotaTerpilih && pilihKota(kotaTerpilih)
-            }
+            onPress={() => {
+              if (kotaTerpilih) {
+                pilihKota(kotaTerpilih);
+              } else if (teksCari.trim()) {
+                setPesanError(null);
+                cariKota(teksCari)
+                  .then((hasil) => {
+                    if (hasil.length > 0) {
+                      pilihKota(hasil[0]);
+                    } else {
+                      setPesanError("Kota tidak ditemukan.");
+                    }
+                  })
+                  .catch(() =>
+                    setPesanError("Gagal mencari kota.")
+                  );
+              }
+            }}
           />
         </View>
       )}
@@ -177,13 +256,12 @@ export default function HalamanUtama() {
               kota={kotaTerpilih.name}
               suhu={cuaca.saatIni.suhu}
               tingkatAQI={konversiTingkatAQI(
-                kualitasUdara.indeksAQI,
+                kualitasUdara.indeksAQI
               )}
               suhuMaksimal={cuaca.harian.suhuMaksimal[0]}
               suhuMinimal={cuaca.harian.suhuMinimal[0]}
             />
 
-            {/* Tombol hanya muncul jika kota belum menjadi favorit */}
             {!sudahFavorit && (
               <Button
                 title="Tambahkan ke Favorit"
@@ -201,7 +279,6 @@ export default function HalamanUtama() {
               />
             )}
 
-            {/* Ditampilkan jika kota sudah menjadi favorit */}
             {sudahFavorit && (
               <Text>Kota ini sudah ada di favorit</Text>
             )}
